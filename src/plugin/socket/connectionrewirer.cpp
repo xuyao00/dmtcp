@@ -192,6 +192,12 @@ ConnectionRewirer::openRestoreSocket(bool hasIPv4Sock,
   memset(&_udsRestoreAddr, 0, sizeof(_udsRestoreAddr));
   memset(&_udsSeqRestoreAddr, 0, sizeof(_udsSeqRestoreAddr));
 
+#ifndef ENABLE_IP6_SUPPORT
+  // registerIncoming() rewires IPv6 connections through the IPv4 restore
+  // socket too: a server that listens on [::] has only IPv6 connections.
+  hasIPv4Sock = hasIPv4Sock || hasIPv6Sock;
+#endif
+
   // Open IP4 Restore Socket
   if (hasIPv4Sock) {
     // Bind and listen on all local interfaces
@@ -207,11 +213,20 @@ ConnectionRewirer::openRestoreSocket(bool hasIPv4Sock,
     ASSERT(restoreSocket.isValid(), "invalid IPv4 restore socket");
     restoreSocket.changeFd(PROTECTED_RESTORE_IP4_SOCK_FD);
 
-    // Setup restore socket for name service
+    // Setup restore socket for name service.  Peers on other hosts connect
+    // to this host's address, as the coordinator sees it; the socket's own,
+    // the wildcard, reaches only this host.  A loopback address reaches
+    // only this host too, and then the wildcard does as well.
     _ip4RestoreAddr.sin_family = AF_INET;
     memcpy(&_ip4RestoreAddr.sin_addr,
            &sockAddr.addr()->sin_addr,
            sizeof(_ip4RestoreAddr.sin_addr));
+    struct in_addr localAddr = {};
+    dmtcp_get_local_ip_addr(&localAddr);
+    if (localAddr.s_addr != htonl(INADDR_ANY) &&
+        (ntohl(localAddr.s_addr) >> 24) != IN_LOOPBACKNET) {
+      _ip4RestoreAddr.sin_addr = localAddr;
+    }
     _ip4RestoreAddr.sin_port = htons(restoreSocket.port());
     _ip4RestoreAddrlen = sizeof(_ip4RestoreAddr);
 
@@ -371,11 +386,16 @@ ConnectionRewirer::registerNSData(void *addr,
   iterator i;
 
   ASSERT_NOT_NULL(theRewirer);
+  ASSERT(conList->empty() || addrLen > 0,
+         "no restore socket for {} incoming connection(s)", conList->size());
   for (i = conList->begin(); i != conList->end(); ++i) {
     const ConnectionIdentifier &id = i->first;
     string addrStr = dmtcp::base64::encode((const char*) addr, addrLen);
-    dmtcp::kvdb::set(PeerDiscoveryDbRestart, id.toString(), addrStr);
-
+    kvdb::KVDBResponse response =
+      dmtcp::kvdb::set(PeerDiscoveryDbRestart, id.toString(), addrStr);
+    ASSERT(response == kvdb::KVDBResponse::SUCCESS,
+           "failed to publish peer discovery data: response={} con_id={}",
+           static_cast<int>(response), id.toString());
   }
 
   // debugPrint();
