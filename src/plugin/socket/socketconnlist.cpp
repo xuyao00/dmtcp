@@ -57,7 +57,11 @@ dmtcp_SocketConnList_EventHook(DmtcpEvent_t event, DmtcpEventData_t *data)
 
     dmtcp_local_barrier("Socket::Ckpt_Retrieve_Peer_Info");
     SocketConnList::drainFd();
-    dmtcp_local_barrier("Socket::Drain");
+    // Global: the drainer takes a socket as drained only when what it has
+    // read ends with the peer's cookie, so no peer may send its handshake
+    // (ckpt()) before every process has drained.  A local barrier orders
+    // only the processes on this host.
+    dmtcp_global_barrier("Socket::Drain");
     SocketConnList::ckpt();
     break;
 
